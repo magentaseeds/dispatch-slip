@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dispatch & Shipping Slip Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Barcode Library -->
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+  <!-- Firebase SDKs -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+    import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+
+    // Firebase Config (Replace with your Firebase credentials or use as is)
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+      apiKey: "AIzaSyDummyKeyForMockFallback",
+      authDomain: "dispatch-app.firebaseapp.com",
+      projectId: "dispatch-app-storage",
+      storageBucket: "dispatch-app.appspot.com"
+    };
+
+    let db = null;
+    let recordsCollection = null;
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      db = getFirestore(app);
+      const appId = typeof __app_id !== 'undefined' ? __app_id : 'magenta-seeds-dispatch';
+      recordsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'shipments');
+      setupFirestoreListener();
+    } catch (e) {
+      console.warn("Firestore initialization fallback to localStorage:", e);
+      loadLocalRecords();
+    }
+
+    function setupFirestoreListener() {
+      if (!recordsCollection) return;
+      const q = query(recordsCollection, orderBy('createdAt', 'desc'));
+      onSnapshot(q, (snapshot) => {
+        window.savedShipments = [];
+        snapshot.forEach((docSnap) => {
+          window.savedShipments.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        window.renderRecordsTable();
+      }, (err) => {
+        console.warn("Firestore permission or network issue, using localStorage:", err);
+        loadLocalRecords();
+      });
+    }
+
+    function loadLocalRecords() {
+      const saved = localStorage.getItem('magenta_shipment_records');
+      window.savedShipments = saved ? JSON.parse(saved) : [];
+      window.renderRecordsTable();
+    }
+
+    window.saveShipmentToDB = async function(data) {
+      if (db && recordsCollection) {
+        try {
+          await addDoc(recordsCollection, {
+            ...data,
+            createdAt: serverTimestamp(),
+            createdDateStr: new Date().toLocaleString('en-IN')
+          });
+          return true;
+        } catch (e) {
+          console.warn("Error adding to Firestore, saving to localStorage:", e);
+        }
+      }
+      // LocalStorage Fallback
+      const local = JSON.parse(localStorage.getItem('magenta_shipment_records') || '[]');
+      local.unshift({ ...data, id: 'loc_' + Date.now(), createdDateStr: new Date().toLocaleString('en-IN') });
+      localStorage.setItem('magenta_shipment_records', JSON.stringify(local));
+      window.savedShipments = local;
+      window.renderRecordsTable();
+      return true;
+    };
+  </script>
+
+  <style>
+    @media print {
+      body * {
+        visibility: hidden;
+      }
+      #printArea, #printArea * {
+        visibility: visible;
+      }
+      #printArea {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+        border: none;
+      }
+      .no-print {
+        display: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans min-h-screen">
+
+  <!-- Top Navbar -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-20 no-print">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center">
+      <div class="flex items-center gap-3">
+        <span class="text-xl font-bold text-slate-900 tracking-tight">📦 Dispatch Slip Generator</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="toggleDrawer(true)" class="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium rounded-lg border border-slate-300 transition">
+          📋 Records (<span id="recordCount">0</span>)
+        </button>
+        <button onclick="saveCurrentData()" id="saveBtn" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg shadow-sm transition">
+          💾 Save Data
+        </button>
+        <button onclick="window.print()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg shadow-sm transition">
+          🖨️ Print Slip
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+    <!-- Left Column: Input Form Controls -->
+    <div class="lg:col-span-5 bg-white p-5 rounded-xl border border-slate-200 shadow-sm space-y-4 no-print h-fit">
+      
+      <!-- Logo upload -->
+      <div class="bg-slate-50 p-3 rounded-lg border border-slate-200 flex items-center justify-between">
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-500">Custom Logo</label>
+          <input type="file" id="logoUpload" accept="image/*" class="text-xs text-slate-600 mt-1" onchange="handleLogoUpload(event)">
+        </div>
+        <button onclick="resetLogo()" class="text-xs text-red-600 hover:underline">Reset Logo</button>
+      </div>
+
+      <!-- Main Slip Fields -->
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">AWB / LR No</label>
+          <input type="text" id="in_awb" placeholder="e.g. 198273645" class="w-full px-3 py-1.5 border rounded-lg text-sm font-mono uppercase focus:ring-2 focus:ring-blue-500" oninput="updateSlip()">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Transporter Name</label>
+          <input type="text" id="in_transporter" placeholder="e.g. V-Trans / DTDC" class="w-full px-3 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" oninput="updateSlip()">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Courier Aggregator</label>
+          <input type="text" id="in_aggregator" placeholder="e.g. Shiprocket / Delhivery" class="w-full px-3 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" oninput="updateSlip()">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Bill No</label>
+          <input type="text" id="in_bill" placeholder="e.g. INV-1049" class="w-full px-3 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" oninput="updateSlip()">
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Order ID</label>
+          <input type="text" id="in_orderid" placeholder="e.g. ORD-9843" class="w-full px-3 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" oninput="updateSlip()">
+        </div>
+
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold uppercase text-slate-600 mb-1">Consignee Address (TO)</label>
+          <textarea id="in_to" rows="3" placeholder="Customer / Receiver Name, Full Address, Pin Code, Phone Number" class="w-full px-3 py-1.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500" oninput="updateSlip()"></textarea>
+        </div>
+      </div>
+
+      <!-- Box Dimension Table Inputs -->
+      <div class="border-t border-slate-200 pt-3">
+        <div class="flex justify-between items-center mb-2">
+          <span class="text-xs font-bold uppercase text-slate-700">Box Dimensions & Weights</span>
+          <button onclick="addBoxRow()" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-800 px-2 py-1 rounded font-medium">+ Add Row</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-left">
+            <thead>
+              <tr class="bg-slate-100 text-slate-600 uppercase text-[10px]">
+                <th class="p-1">Boxes</th>
+                <th class="p-1">L (cm)</th>
+                <th class="p-1">W (cm)</th>
+                <th class="p-1">H (cm)</th>
+                <th class="p-1">Each Wt(Kg)</th>
+                <th class="p-1"></th>
+              </tr>
+            </thead>
+            <tbody id="boxInputRows">
+              <!-- JS rendered rows -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Charges & Dispatch Details -->
+      <div class="border-t border-slate-200 pt-3 grid grid-cols-2 gap-3 text-xs">
+        <div>
+          <label class="font-semibold text-slate-600">Freight Charge (₹)</label>
+          <input type="number" id="in_freight" placeholder="0.00" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+        <div>
+          <label class="font-semibold text-slate-600">Risk Charge (₹)</label>
+          <input type="number" id="in_risk" placeholder="0.00" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+        <div>
+          <label class="font-semibold text-slate-600">LR Charge (₹)</label>
+          <input type="number" id="in_lr" placeholder="0.00" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+        <div>
+          <label class="font-semibold text-slate-600">FM Charge (₹)</label>
+          <input type="number" id="in_fm" placeholder="0.00" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+        <div>
+          <label class="font-semibold text-slate-600">Booking Date</label>
+          <input type="date" id="in_date" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+        <div>
+          <label class="font-semibold text-slate-600">Serial No. (MBPL)</label>
+          <input type="text" id="in_slno" placeholder="0001" class="w-full px-2 py-1.5 border rounded text-sm mt-1" oninput="updateSlip()">
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right Column: Printable Label Preview Area -->
+    <div class="lg:col-span-7 flex flex-col items-center">
+      <div class="w-full flex justify-between items-center mb-2 px-1 text-xs text-slate-500 font-medium">
+        <span>Live Slip Preview (A5 / Parcel Box Label)</span>
+        <button onclick="window.print()" class="text-blue-600 hover:underline">Click to Print Preview</button>
+      </div>
+
+      <!-- THE SLIP CANVAS (Matches original template) -->
+      <div id="printArea" class="w-full max-w-[760px] bg-[#fcedde] border-2 border-black p-5 text-black font-sans shadow-md select-none">
+        
+        <!-- Top Section: Header & Summary -->
+        <div class="flex justify-between items-start pb-2 border-b-2 border-black">
+          <!-- Logo & Brand Header -->
+          <div class="flex items-center gap-3">
+            <div id="logoContainer" class="h-16 flex items-center">
+              <img id="slipLogo" src="" alt="Brand Logo" class="max-h-16 max-w-[200px] object-contain hidden">
+              <div id="defaultLogo" class="flex items-center gap-2">
+                <span class="text-2xl font-black text-[#1e1b4b] tracking-tight">Magenta</span>
+                <span class="text-2xl font-bold text-[#15803d]">seeds</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Total boxes & weight summary -->
+          <div class="text-right font-bold text-sm tracking-wide">
+            <div>Total No. Of Boxes: <span id="out_total_boxes" class="underline underline-offset-4 decoration-dotted font-extrabold text-base">0</span></div>
+            <div class="mt-1">Total Weight: <span id="out_total_weight" class="underline underline-offset-4 decoration-dotted font-extrabold text-base">0 Kg</span></div>
+          </div>
+        </div>
+
+        <!-- Middle Section: Barcode + Details & Dimensions Table -->
+        <div class="grid grid-cols-12 gap-4 mt-3">
+          
+          <!-- Left Details & Live Barcode -->
+          <div class="col-span-6 space-y-2 text-xs font-semibold">
+            <!-- Scannable Barcode Canvas -->
+            <div class="bg-white p-2 rounded border border-black/30 flex flex-col items-center justify-center">
+              <svg id="barcodeCanvas" class="w-full max-h-14"></svg>
+            </div>
+
+            <div class="flex items-baseline">
+              <span class="w-36 font-bold">• AWB/LR No:</span>
+              <span id="out_awb" class="font-mono text-sm font-extrabold text-slate-900"></span>
+            </div>
+            <div class="flex items-baseline">
+              <span class="w-36 font-bold">• Transporter Name:</span>
+              <span id="out_transporter"></span>
+            </div>
+            <div class="flex items-baseline">
+              <span class="w-36 font-bold">• Courier Aggregator:</span>
+              <span id="out_aggregator"></span>
+            </div>
+            <div class="flex items-baseline">
+              <span class="w-36 font-bold">• Bill No / Order ID:</span>
+              <span>
+                <span id="out_bill"></span> / <span id="out_orderid"></span>
+              </span>
+            </div>
+
+            <!-- Consignee TO Box -->
+            <div class="mt-3">
+              <div class="font-extrabold text-xs uppercase tracking-wider mb-1">TO :</div>
+              <div id="out_to" class="border-2 border-black p-2 min-h-[95px] text-xs font-medium bg-white/70 whitespace-pre-wrap leading-tight"></div>
+            </div>
+          </div>
+
+          <!-- Right Details: Box Matrix & Charges -->
+          <div class="col-span-6 flex flex-col justify-between">
+            
+            <!-- Dimensions Table -->
+            <table class="w-full border-2 border-black border-collapse text-[11px] text-center font-bold">
+              <thead>
+                <tr class="border-b-2 border-black bg-black/5">
+                  <th class="border-r border-black p-1">No. Of Boxes</th>
+                  <th class="border-r border-black p-1">Length</th>
+                  <th class="border-r border-black p-1">Width</th>
+                  <th class="border-r border-black p-1">Height</th>
+                  <th class="p-1">Each - Weight</th>
+                </tr>
+              </thead>
+              <tbody id="out_box_rows">
+                <!-- Dynamically filled 4 rows -->
+              </tbody>
+            </table>
+
+            <!-- Bottom Rates & Sender Address -->
+            <div class="grid grid-cols-2 gap-2 text-[11px] mt-4 font-semibold">
+              <div class="space-y-1">
+                <div>Freight Charge : ₹<span id="out_freight">0.00</span></div>
+                <div>Risk Charge : ₹<span id="out_risk">0.00</span></div>
+                <div>LR Charge : ₹<span id="out_lr">0.00</span></div>
+                <div>FM Charge : ₹<span id="out_fm">0.00</span></div>
+                <div class="font-bold border-t border-black/40 pt-0.5">Total Shipping : ₹<span id="out_total_ship">0.00</span></div>
+                <div class="pt-1">Booking Date: <span id="out_date" class="font-bold"></span></div>
+              </div>
+
+              <!-- FROM Address Block -->
+              <div class="text-[10.5px] leading-tight text-right flex flex-col justify-end">
+                <span class="font-extrabold uppercase">FROM :</span>
+                <span class="font-black text-xs text-slate-900">Magenta Biotech Pvt Ltd</span>
+                <span>East Udayrajpur, Madhyamgram</span>
+                <span>Kolkata-700129</span>
+                <span>Phone: +91 70047 32223</span>
+                <span>contact@magentabiotech.com</span>
+                <span class="mt-1 font-bold">Sl No - MBPL2026-<span id="out_slno">....</span></span>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Saved Records Slide-over Drawer -->
+  <div id="drawer" class="fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col no-print border-l">
+    <div class="p-4 border-b flex justify-between items-center bg-slate-50">
+      <h3 class="font-bold text-slate-800">Saved Shipments</h3>
+      <div class="flex gap-2">
+        <button onclick="exportCSV()" class="text-xs px-2 py-1 bg-green-600 text-white rounded font-medium">Export CSV</button>
+        <button onclick="toggleDrawer(false)" class="text-slate-500 hover:text-black font-bold text-lg">&times;</button>
+      </div>
+    </div>
+    <div class="p-3 border-b">
+      <input type="text" id="searchRecords" placeholder="Search by AWB, Order ID or Consignee..." class="w-full text-xs px-3 py-2 border rounded-lg" oninput="renderRecordsTable()">
+    </div>
+    <div class="flex-1 overflow-y-auto p-3 divide-y divide-slate-100" id="recordsList">
+      <!-- Records injected here -->
+    </div>
+  </div>
+
+  <script>
+    // State management
+    window.savedShipments = [];
+    let boxRows = [
+      { boxes: 1, l: 30, w: 20, h: 15, wt: 5 },
+      { boxes: '', l: '', w: '', h: '', wt: '' },
+      { boxes: '', l: '', w: '', h: '', wt: '' },
+      { boxes: '', l: '', w: '', h: '', wt: '' }
+    ];
+
+    function init() {
+      // Set default date
+      document.getElementById('in_date').valueAsDate = new Date();
+      document.getElementById('in_slno').value = '01';
+      document.getElementById('in_awb').value = 'MAG' + Math.floor(10000000 + Math.random() * 90000000);
+      document.getElementById('in_transporter').value = 'DTDC Express';
+      document.getElementById('in_aggregator').value = 'Shiprocket';
+
+      // Load logo if previously saved
+      const savedLogo = localStorage.getItem('magenta_custom_logo');
+      if (savedLogo) applyLogo(savedLogo);
+
+      renderBoxInputs();
+      updateSlip();
+    }
+
+    // Dynamic Box Matrix
+    function renderBoxInputs() {
+      const tbody = document.getElementById('boxInputRows');
+      tbody.innerHTML = '';
+      boxRows.forEach((row, i) => {
+        tbody.innerHTML += `
+          <tr class="border-b">
+            <td class="p-1"><input type="number" value="${row.boxes}" oninput="updateBoxRow(${i}, 'boxes', this.value)" class="w-12 border p-1 rounded text-center"></td>
+            <td class="p-1"><input type="number" value="${row.l}" oninput="updateBoxRow(${i}, 'l', this.value)" class="w-12 border p-1 rounded text-center"></td>
+            <td class="p-1"><input type="number" value="${row.w}" oninput="updateBoxRow(${i}, 'w', this.value)" class="w-12 border p-1 rounded text-center"></td>
+            <td class="p-1"><input type="number" value="${row.h}" oninput="updateBoxRow(${i}, 'h', this.value)" class="w-12 border p-1 rounded text-center"></td>
+            <td class="p-1"><input type="number" step="0.1" value="${row.wt}" oninput="updateBoxRow(${i}, 'wt', this.value)" class="w-14 border p-1 rounded text-center"></td>
+            <td class="p-1 text-center"><button onclick="removeBoxRow(${i})" class="text-red-500 font-bold">&times;</button></td>
+          </tr>
+        `;
+      });
+    }
+
+    function addBoxRow() {
+      if (boxRows.length >= 6) return alert('Maximum 6 rows allowed');
+      boxRows.push({ boxes: '', l: '', w: '', h: '', wt: '' });
+      renderBoxInputs();
+      updateSlip();
+    }
+
+    function removeBoxRow(idx) {
+      if (boxRows.length <= 1) return;
+      boxRows.splice(idx, 1);
+      renderBoxInputs();
+      updateSlip();
+    }
+
+    function updateBoxRow(idx, field, val) {
+      boxRows[idx][field] = val;
+      updateSlip();
+    }
+
+    // Update Live Slip Visuals
+    function updateSlip() {
+      const awb = document.getElementById('in_awb').value.trim() || 'AWB-10000001';
+      document.getElementById('out_awb').innerText = awb;
+      document.getElementById('out_transporter').innerText = document.getElementById('in_transporter').value || '—';
+      document.getElementById('out_aggregator').innerText = document.getElementById('in_aggregator').value || '—';
+      document.getElementById('out_bill').innerText = document.getElementById('in_bill').value || '—';
+      document.getElementById('out_orderid').innerText = document.getElementById('in_orderid').value || '—';
+      document.getElementById('out_to').innerText = document.getElementById('in_to').value || 'Enter Consignee details...';
+      document.getElementById('out_date').innerText = document.getElementById('in_date').value || '—';
+      document.getElementById('out_slno').innerText = document.getElementById('in_slno').value || '....';
+
+      // Barcode generation
+      try {
+        JsBarcode("#barcodeCanvas", awb, {
+          format: "CODE128",
+          lineColor: "#000000",
+          width: 1.6,
+          height: 38,
+          displayValue: false
+        });
+      } catch (e) {
+        console.error("Barcode generation error:", e);
+      }
+
+      // Box Table & Totals calculation
+      let totalBoxes = 0;
+      let totalWeight = 0;
+      const outTbody = document.getElementById('out_box_rows');
+      outTbody.innerHTML = '';
+
+      for (let i = 0; i < 4; i++) {
+        const row = boxRows[i] || { boxes: '', l: '', w: '', h: '', wt: '' };
+        const b = parseFloat(row.boxes) || 0;
+        const w = parseFloat(row.wt) || 0;
+        totalBoxes += b;
+        totalWeight += (b * w);
+
+        outTbody.innerHTML += `
+          <tr class="border-b border-black h-5">
+            <td class="border-r border-black p-0.5">${row.boxes || ''}</td>
+            <td class="border-r border-black p-0.5">${row.l || ''}</td>
+            <td class="border-r border-black p-0.5">${row.w || ''}</td>
+            <td class="border-r border-black p-0.5">${row.h || ''}</td>
+            <td class="p-0.5">${row.wt ? row.wt + ' kg' : ''}</td>
+          </tr>
+        `;
+      }
+
+      document.getElementById('out_total_boxes').innerText = totalBoxes;
+      document.getElementById('out_total_weight').innerText = totalWeight.toFixed(2) + ' Kg';
+
+      // Financials
+      const f = parseFloat(document.getElementById('in_freight').value) || 0;
+      const r = parseFloat(document.getElementById('in_risk').value) || 0;
+      const lr = parseFloat(document.getElementById('in_lr').value) || 0;
+      const fm = parseFloat(document.getElementById('in_fm').value) || 0;
+      
+      document.getElementById('out_freight').innerText = f.toFixed(2);
+      document.getElementById('out_risk').innerText = r.toFixed(2);
+      document.getElementById('out_lr').innerText = lr.toFixed(2);
+      document.getElementById('out_fm').innerText = fm.toFixed(2);
+      document.getElementById('out_total_ship').innerText = (f + r + lr + fm).toFixed(2);
+    }
+
+    // Logo Handlers
+    function handleLogoUpload(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const base64 = evt.target.result;
+        localStorage.setItem('magenta_custom_logo', base64);
+        applyLogo(base64);
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function applyLogo(src) {
+      const img = document.getElementById('slipLogo');
+      img.src = src;
+      img.classList.remove('hidden');
+      document.getElementById('defaultLogo').classList.add('hidden');
+    }
+
+    function resetLogo() {
+      localStorage.removeItem('magenta_custom_logo');
+      document.getElementById('slipLogo').src = '';
+      document.getElementById('slipLogo').classList.add('hidden');
+      document.getElementById('defaultLogo').classList.remove('hidden');
+    }
+
+    // Database Actions
+    async function saveCurrentData() {
+      const btn = document.getElementById('saveBtn');
+      btn.innerText = 'Saving...';
+      btn.disabled = true;
+
+      const payload = {
+        awb: document.getElementById('in_awb').value,
+        transporter: document.getElementById('in_transporter').value,
+        aggregator: document.getElementById('in_aggregator').value,
+        billNo: document.getElementById('in_bill').value,
+        orderId: document.getElementById('in_orderid').value,
+        toAddress: document.getElementById('in_to').value,
+        bookingDate: document.getElementById('in_date').value,
+        slNo: document.getElementById('in_slno').value,
+        boxes: boxRows,
+        totalBoxes: document.getElementById('out_total_boxes').innerText,
+        totalWeight: document.getElementById('out_total_weight').innerText,
+        shippingTotal: document.getElementById('out_total_ship').innerText
+      };
+
+      await window.saveShipmentToDB(payload);
+      btn.innerText = '✅ Saved';
+      setTimeout(() => {
+        btn.innerText = '💾 Save Data';
+        btn.disabled = false;
+      }, 1500);
+    }
+
+    // Drawer & Records Table
+    function toggleDrawer(open) {
+      const drawer = document.getElementById('drawer');
+      if (open) {
+        drawer.classList.remove('translate-x-full');
+      } else {
+        drawer.classList.add('translate-x-full');
+      }
+    }
+
+    window.renderRecordsTable = function() {
+      const list = document.getElementById('recordsList');
+      const search = (document.getElementById('searchRecords')?.value || '').toLowerCase();
+      const records = window.savedShipments || [];
+      document.getElementById('recordCount').innerText = records.length;
+
+      const filtered = records.filter(r => 
+        (r.awb && r.awb.toLowerCase().includes(search)) ||
+        (r.orderId && r.orderId.toLowerCase().includes(search)) ||
+        (r.toAddress && r.toAddress.toLowerCase().includes(search))
+      );
+
+      if (filtered.length === 0) {
+        list.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">No saved shipment records found.</div>`;
+        return;
+      }
+
+      list.innerHTML = filtered.map(r => `
+        <div class="py-3 px-1 flex justify-between items-start text-xs">
+          <div>
+            <div class="font-bold text-slate-900">${r.awb || 'No AWB'} <span class="font-normal text-slate-500">(${r.bookingDate || ''})</span></div>
+            <div class="text-slate-600 truncate max-w-[220px]">${r.toAddress ? r.toAddress.replace(/\\n/g, ', ') : 'No Address'}</div>
+            <div class="text-[10px] text-slate-400 font-mono mt-0.5">Boxes: ${r.totalBoxes || 0} | Wt: ${r.totalWeight || '0'} | Total: ₹${r.shippingTotal || 0}</div>
+          </div>
+          <button onclick="loadRecord('${r.id}')" class="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-[11px] font-semibold">Load</button>
+        </div>
+      `).join('');
+    };
+
+    function loadRecord(id) {
+      const rec = (window.savedShipments || []).find(x => x.id === id);
+      if (!rec) return;
+
+      document.getElementById('in_awb').value = rec.awb || '';
+      document.getElementById('in_transporter').value = rec.transporter || '';
+      document.getElementById('in_aggregator').value = rec.aggregator || '';
+      document.getElementById('in_bill').value = rec.billNo || '';
+      document.getElementById('in_orderid').value = rec.orderId || '';
+      document.getElementById('in_to').value = rec.toAddress || '';
+      document.getElementById('in_date').value = rec.bookingDate || '';
+      document.getElementById('in_slno').value = rec.slNo || '';
+
+      if (rec.boxes && Array.isArray(rec.boxes)) {
+        boxRows = rec.boxes;
+        renderBoxInputs();
+      }
+
+      updateSlip();
+      toggleDrawer(false);
+    }
+
+    // Export to Excel / CSV
+    function exportCSV() {
+      const records = window.savedShipments || [];
+      if (records.length === 0) return alert('No records to export');
+
+      let csv = "AWB,Order ID,Bill No,Transporter,Consignee,Total Boxes,Total Weight,Shipping Total,Date\n";
+      records.forEach(r => {
+        const cleanTo = (r.toAddress || '').replace(/"/g, '""').replace(/\n/g, ' ');
+        csv += `"${r.awb || ''}","${r.orderId || ''}","${r.billNo || ''}","${r.transporter || ''}","${cleanTo}","${r.totalBoxes || ''}","${r.totalWeight || ''}","${r.shippingTotal || ''}","${r.bookingDate || ''}"\n`;
+      });
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `shipments_export_${new Date().toISOString().slice(0,10)}.csv`;
+      link.click();
+    }
+
+    window.onload = init;
+  </script>
+</body>
+</html>
